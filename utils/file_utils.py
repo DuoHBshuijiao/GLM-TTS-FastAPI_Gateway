@@ -11,20 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import torch
 import torchaudio
 import json
 import os
 
 def load_wav(wav, target_sr):
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     speech, sample_rate = torchaudio.load(wav)
-    speech = speech.to("cuda")
+    speech = speech.to(dev)
     speech = speech.mean(dim=0, keepdim=True)
     if sample_rate != target_sr:
         resampler = torchaudio.transforms.Resample(
                     orig_freq=sample_rate,
                     new_freq=target_sr
-                ).to('cuda')
-        speech = resampler(speech).to("cuda")
+                ).to(dev)
+        speech = resampler(speech).to(dev)
     return speech
 
 def get_jsonl(jsonl_file_path=None):

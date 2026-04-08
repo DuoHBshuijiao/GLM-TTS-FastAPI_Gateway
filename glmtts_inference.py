@@ -34,6 +34,14 @@ MAX_LLM_SEQ_INP_LEN = 750
 TOKEN_RATE = 25
 EOS_TOKEN_ID_AFTER_MINUS_BOS = None
 
+
+class InferenceCancelled(Exception):
+    """Raised when inference is cancelled (e.g. HTTP client disconnected)."""
+
+
+def _cancelled(cancel_event: "threading.Event | None") -> bool:
+    return cancel_event is not None and cancel_event.is_set()
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -222,6 +230,7 @@ def generate_long(
     local_llm_forward=local_llm_forward,
     local_flow_forward=local_flow_forward,
     use_phoneme=False,
+    cancel_event: "threading.Event | None" = None,
 ):
     outputs = []
     full_mels = []
@@ -236,7 +245,12 @@ def generate_long(
     }
     short_text_list = text_frontend.split_by_len(syn_text)
 
+    if _cancelled(cancel_event):
+        raise InferenceCancelled("Inference cancelled before start")
+
     for _, tts_text in enumerate(short_text_list):
+        if _cancelled(cancel_event):
+            raise InferenceCancelled("Inference cancelled")
         seed_util.set_seed(seed)
         tts_text_tn = text_frontend.text_normalize(
             tts_text
@@ -385,9 +399,9 @@ def load_models(use_phoneme=False, sample_rate=24000):
     # Load Speech Tokenizer
     speech_tokenizer_path = os.path.join("ckpt", "speech_tokenizer")
     _model, _feature_extractor = yaml_util.load_speech_tokenizer(
-        speech_tokenizer_path
+        speech_tokenizer_path, device=DEVICE
     )
-    speech_tokenizer = SpeechTokenizer(_model, _feature_extractor)
+    speech_tokenizer = SpeechTokenizer(_model, _feature_extractor, device=DEVICE)
 
     # Load Frontends
     frontend, text_frontend = load_frontends(speech_tokenizer, sample_rate=sample_rate, use_phoneme=use_phoneme)
