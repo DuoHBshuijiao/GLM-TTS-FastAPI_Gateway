@@ -98,6 +98,199 @@ bash glmtts_inference.sh
 python -m tools.gradio_app
 ```
 
+#### 本地 HTTP API（FastAPI）
+
+用于被其它程序以 HTTP 调用（零样本 TTS）。默认监听 `http://127.0.0.1:8088`（`0.0.0.0` 可局域网访问）。实现见 [`tools/api_server.py`](tools/api_server.py)，推理与 Gradio 共用 [`tools/tts_service.py`](tools/tts_service.py)。
+
+```bash
+python -m tools.api_server
+```
+
+完整接口、参数与示例见下文 **「本地 HTTP API 对接说明」**。Windows GPU 环境与一键脚本可参考仓库内 [`GPU_RUN_zh.md`](GPU_RUN_zh.md)。
+
+## 本地 HTTP API 对接说明
+
+本节描述如何通过 HTTP 将本地 GLM-TTS 服务接入其它应用。OpenAPI 交互文档：服务启动后访问 `http://<host>:<port>/docs`（Swagger UI）。
+
+### 概述
+
+| 项目 | 说明 |
+|------|------|
+| **能力** | 零样本语音克隆：参考音频 + 参考文本 → 合成目标文本的语音 |
+| **默认基址** | `http://127.0.0.1:8088` |
+| **版本** | API 应用版本 `1.0.0`（见 `tools/api_server.py`） |
+| **认证** | 无（本地服务；生产环境请自行在网关层鉴权） |
+
+**与 Gradio 的关系**：`python -m tools.gradio_app` 默认端口 **8048**，面向浏览器。**程序化对接更推荐使用本 FastAPI**，路径与字段更稳定。若需通过 Gradio 的队列/组件接口调用，可使用与当前 `gradio` 版本匹配的 `gradio_client`（详见 [`GPU_RUN_zh.md`](GPU_RUN_zh.md) 相关说明）。
+
+### 启动与环境变量
+
+```bash
+# 仓库根目录
+python -m tools.api_server
+```
+
+| 环境变量 | 默认值 | 含义 |
+|----------|--------|------|
+| `GLMTTS_API_HOST` | `0.0.0.0` | 监听地址 |
+| `GLMTTS_API_PORT` | `8088` | 端口 |
+
+推理侧还会受 CUDA、ONNX、cuDNN 等环境影响；Windows 下可使用 `env_gpu.ps1` 与 `run_api_gpu.ps1`（见 [`GPU_RUN_zh.md`](GPU_RUN_zh.md)）。
+
+### 对接前需理解的概念
+
+1. **`prompt_text`（参考文本）**  
+   应与参考音频中的朗读内容一致（尽量逐字准确）。为空时服务端仍可能接受请求，但相似度与稳定性可能下降。
+
+2. **`input_text`（合成文本）**  
+   要朗读的目标内容。**不能为空或全空白**，否则返回 HTTP **400**。
+
+3. **参考音频**  
+   - `POST /api/v1/tts`：客户端 **上传文件**（适合跨机器）。  
+   - `POST /api/v1/tts/json`：传服务器本机 **文件路径**（仅当客户端与 API 同机或共享可读路径时使用）。
+
+4. **`sample_rate` 与 `use_cache`**  
+   首次推理会加载模型；切换采样率可能触发按新采样率重新加载。`use_cache` 为推理 KV cache，长文本时通常保持 `true` 以降低延迟。
+
+### 接口一览
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/health` | 健康检查 |
+| `POST` | `/api/v1/tts` | `multipart/form-data`：上传参考音频，**响应体为 WAV 二进制** |
+| `POST` | `/api/v1/tts/json` | `application/json`：参考音频为**服务端路径**，**响应为 JSON（含 Base64 WAV）** |
+| `POST` | `/api/v1/clear_vram` | 卸载模型缓存并释放显存，下次推理会重新加载模型 |
+
+### 各接口说明
+
+#### `GET /health`
+
+- **响应** `200`，`application/json`：`{"status": "ok", "service": "glm-tts"}`
+- **用途**：探活、连通性测试。
+
+#### `POST /api/v1/tts`
+
+- **Content-Type**：`multipart/form-data`
+- **成功** `200`：响应体为 **WAV 文件**（`Content-Type: audio/wav`，`Content-Disposition: attachment; filename="glm_tts_out.wav"`）。音频为 **单声道、16-bit PCM**。
+
+**表单字段**：
+
+| 字段名 | 类型 | 必填 | 默认值 | 说明 |
+|--------|------|------|--------|------|
+| `prompt_text` | string | 是 | — | 与参考音频对应的文本 |
+| `input_text` | string | 是 | — | 要合成的目标文本 |
+| `prompt_audio` | file | 是 | — | 参考音色；扩展名须为 `.wav`、`.flac` 或无扩展名（否则 400） |
+| `seed` | int | 否 | `42` | 随机种子 |
+| `sample_rate` | int | 否 | `24000` | 一般为 **24000** 或 **32000** |
+| `use_cache` | bool | 否 | `true` | 是否使用 KV cache |
+
+**错误**：**400**（参数/校验失败，响应体为错误信息字符串）；**500**（其它异常）。
+
+**注意**：合成可能耗时较长，客户端宜设置 **较长超时**（例如数百秒，视文本长度而定）。
+
+#### `POST /api/v1/tts/json`
+
+- **Content-Type**：`application/json`
+
+**JSON 字段**：
+
+| 字段名 | 类型 | 必填 | 默认值 | 说明 |
+|--------|------|------|--------|------|
+| `prompt_text` | string | 否 | `""` | 参考文本（不推荐留空） |
+| `input_text` | string | 是 | — | 目标合成文本 |
+| `prompt_audio_path` | string | 是 | — | **API 进程所在机器**上可读的参考音频路径 |
+| `seed` | int | 否 | `42` | 同 multipart |
+| `sample_rate` | int | 否 | `24000` | 同 multipart |
+| `use_cache` | bool | 否 | `true` | 同 multipart |
+
+**成功** `200`，`application/json` 示例：
+
+```json
+{
+  "sample_rate": 24000,
+  "format": "pcm_s16le_mono_wav_base64",
+  "audio_wav_base64": "<标准 Base64 编码的整段 WAV 文件>"
+}
+```
+
+`audio_wav_base64` 为 **完整 WAV 文件** 的 Base64（标准 alphabet），解码后可直接存为 `.wav`。
+
+#### `POST /api/v1/clear_vram`
+
+- **请求体**：无
+- **成功** `200`：`{"ok": true, "message": "Memory cleared. Models will reload on next inference."}`
+- **用途**：显存紧张时释放缓存；**下一次推理会重新加载模型**。
+
+### 参数语义速查
+
+| 参数 | 含义 |
+|------|------|
+| `prompt_text` | 参考音频的转写，尽量与录音一致 |
+| `input_text` | 合成内容；经文本前端归一化处理 |
+| `prompt_audio` / `prompt_audio_path` | 说话人参考；路径方式须文件存在且可读 |
+| `seed` | 控制随机性；固定值便于复现 |
+| `sample_rate` | 输出采样率，常用 24000 或 32000 |
+| `use_cache` | KV cache，长文本建议 `true` |
+
+### 对接建议
+
+1. **跨机器**：仅使用 **`POST /api/v1/tts`**（multipart），勿将本机路径用于 `tts/json`。
+2. **同机批量**：可使用 **`/api/v1/tts/json`**，避免重复上传大文件。
+3. **错误处理**：根据 **400/500** 解析响应体文本。
+4. **超时与重试**：推理耗时长，超时时间宜放宽；显存问题可先调用 **`/api/v1/clear_vram`** 再重试。
+
+### 请求示例
+
+**curl（multipart，将路径换为你的参考 wav）**：
+
+```bash
+curl -X POST "http://127.0.0.1:8088/api/v1/tts" \
+  -F "prompt_text=他当时还跟线下其他的站姐吵架，然后，打架进局子了。" \
+  -F "input_text=我最爱吃人参果，你喜欢吃吗？" \
+  -F "prompt_audio=@examples/prompt/jiayan_zh.wav" \
+  -F "seed=42" \
+  -F "sample_rate=24000" \
+  -F "use_cache=true" \
+  --output "out.wav"
+```
+
+**curl（JSON，仅当 `prompt_audio_path` 在服务端有效）**：
+
+```bash
+curl -X POST "http://127.0.0.1:8088/api/v1/tts/json" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt_text":"他当时还跟线下其他的站姐吵架，然后，打架进局子了。","input_text":"我最爱吃人参果，你喜欢吃吗？","prompt_audio_path":"/path/to/jiayan_zh.wav","seed":42,"sample_rate":24000,"use_cache":true}'
+```
+
+**Python（multipart）**：
+
+```python
+import pathlib
+import requests
+
+url = "http://127.0.0.1:8088/api/v1/tts"
+files = {"prompt_audio": open("examples/prompt/jiayan_zh.wav", "rb")}
+data = {
+    "prompt_text": "他当时还跟线下其他的站姐吵架，然后，打架进局子了。",
+    "input_text": "我最爱吃人参果，你喜欢吃吗？",
+    "seed": "42",
+    "sample_rate": "24000",
+    "use_cache": "true",
+}
+r = requests.post(url, files=files, data=data, timeout=600)
+r.raise_for_status()
+pathlib.Path("out_api.wav").write_bytes(r.content)
+```
+
+需安装：`pip install requests`。
+
+### 相关源码
+
+| 文件 | 作用 |
+|------|------|
+| [`tools/api_server.py`](tools/api_server.py) | FastAPI 路由、multipart/JSON 响应 |
+| [`tools/tts_service.py`](tools/tts_service.py) | 模型加载、`run_inference_api`、显存清理 |
+
 ## 系统架构
 
 ### 整体架构
@@ -225,6 +418,8 @@ GLM-TTS/
 │   └── cosyvoice_frontend.yaml      # 前端配置
 ├── tools/                           # 工具脚本
 │   ├── gradio_app.py                # Gradio交互界面
+│   ├── api_server.py                # 本地 HTTP API（FastAPI）
+│   ├── tts_service.py             # Gradio 与 API 共用的推理逻辑
 │   ├── ffmpeg_speech_control.py     # 音频处理工具
 │   └── flow_reconstruct.py          # 音频重建
 └── utils/                           # 通用工具
