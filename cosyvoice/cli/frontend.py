@@ -41,19 +41,38 @@ try:
     import ttsfrd
     use_ttsfrd = True
 except ImportError:
-    print("Warning: failed to import ttsfrd, use WeTextProcessing instead")
-    from tn.chinese.normalizer import Normalizer as ZhNormalizer
-    from tn.english.normalizer import Normalizer as EnNormalizer
     use_ttsfrd = False
+    try:
+        print("Warning: failed to import ttsfrd, use WeTextProcessing instead")
+        from tn.chinese.normalizer import Normalizer as ZhNormalizer
+        from tn.english.normalizer import Normalizer as EnNormalizer
+    except ImportError:
+        print(
+            "Warning: WeTextProcessing/tn unavailable (e.g. Windows without pynini). "
+            "Using identity text normalization; quality may be reduced."
+        )
+
+        class _IdentityNormalizer:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def normalize(self, text: str) -> str:
+                return text
+
+        ZhNormalizer = EnNormalizer = _IdentityNormalizer
 
 
 class SpeechTokenizer:
     """
     Tokenizer for extracting discrete speech tokens from audio.
     """
-    def __init__(self, model, feature_extractor):
+    def __init__(self, model, feature_extractor, device=None):
         self.model = model
         self.feature_extractor = feature_extractor
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = device if isinstance(device, torch.device) else torch.device(device)
         self._resample_buffer: dict[int, torchaudio.transforms.Resample] = {}
 
     def extract_speech_token(self, utts: List[Union[str, Tuple[torch.Tensor, int]]]) -> List[List[int]]:
@@ -61,6 +80,8 @@ class SpeechTokenizer:
 
         _resample_buffer = self._resample_buffer
         model, feature_extractor = self.model, self.feature_extractor
+        dev = self.device
+        dev_str = str(dev)
 
         with torch.no_grad():
             audios, indices = [], []
@@ -70,7 +91,7 @@ class SpeechTokenizer:
                 else:
                     audio, sample_rate = torchaudio.load(utt)
 
-                audio = audio.cuda()
+                audio = audio.to(dev)
 
                 # Resample to 16k if needed
                 if sample_rate != 16000:
@@ -78,7 +99,7 @@ class SpeechTokenizer:
                         _resample_buffer[sample_rate] = torchaudio.transforms.Resample(
                             orig_freq=sample_rate,
                             new_freq=16000
-                        ).to('cuda')
+                        ).to(dev)
                     audio = _resample_buffer[sample_rate](audio)
 
                 audio = audio[0]  # Take first channel
@@ -99,9 +120,9 @@ class SpeechTokenizer:
 
             for start in range(0, len(audios), batch_size):
                 features = feature_extractor(audios[start: start + batch_size], sampling_rate=16000,
-                                             return_attention_mask=True, return_tensors="pt", device='cuda',
+                                             return_attention_mask=True, return_tensors="pt", device=dev_str,
                                              padding="longest", pad_to_multiple_of=stride)
-                features = features.to(device="cuda")
+                features = features.to(device=dev)
                 outputs = model(**features)
                 speech_tokens = outputs.quantized_token_ids
 
@@ -600,17 +621,31 @@ class TTSFrontEnd:
         option = onnxruntime.SessionOptions()
         option.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
         option.intra_op_num_threads = 1
-        
-        # Determine providers based on availability
-        providers = ['CPUExecutionProvider']
-        if torch.cuda.is_available():
-             providers.insert(0, ('CUDAExecutionProvider', {
-                 'device_id': 0,
-                 'arena_extend_strategy': 'kSameAsRequested',
-                 'cudnn_conv_algo_search': 'DEFAULT',
-             }))
 
-        self.campplus_session = onnxruntime.InferenceSession(campplus_model, sess_options=option, providers=providers)
+        # CampPlus ONNX is small; CPU EP avoids Windows DLL issues (cuDNN 9 + CUDA 12 in PATH for ORT GPU).
+        # PyTorch (LLM/Flow) still uses GPU when available. Set GLMTTS_ONNX_GPU=1 to try CUDA EP for ONNX.
+        use_onnx_cuda = (
+            os.environ.get("GLMTTS_ONNX_GPU", "").strip() == "1"
+            and torch.cuda.is_available()
+        )
+        if use_onnx_cuda:
+            providers = [
+                (
+                    "CUDAExecutionProvider",
+                    {
+                        "device_id": 0,
+                        "arena_extend_strategy": "kSameAsRequested",
+                        "cudnn_conv_algo_search": "DEFAULT",
+                    },
+                ),
+                "CPUExecutionProvider",
+            ]
+        else:
+            providers = ["CPUExecutionProvider"]
+
+        self.campplus_session = onnxruntime.InferenceSession(
+            campplus_model, sess_options=option, providers=providers
+        )
         self.speech_tokenizer = speech_tokenizer
 
         # Load speaker info if available
