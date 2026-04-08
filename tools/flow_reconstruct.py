@@ -35,8 +35,10 @@ def load_flow_only(frontend_dir, flow_ckpt, flow_config, sample_rate=24000):
     print(f"[INFO] Loading Speech Tokenizer and Frontends (SR={sample_rate}) from {frontend_dir}...")
     
     # Load Speech Tokenizer
-    _model, _feature_extractor = yaml_util.load_speech_tokenizer(os.path.join('ckpt', 'speech_tokenizer'))
-    speech_tokenizer = SpeechTokenizer(_model, _feature_extractor)
+    _model, _feature_extractor = yaml_util.load_speech_tokenizer(
+        os.path.join('ckpt', 'speech_tokenizer'), device=DEVICE
+    )
+    speech_tokenizer = SpeechTokenizer(_model, _feature_extractor, device=DEVICE)
     
     # Load Frontends with specific sample_rate
     frontend, _ = load_frontends(
