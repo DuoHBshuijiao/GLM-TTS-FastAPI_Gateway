@@ -41,7 +41,7 @@ GLM-TTS is a high-quality text-to-speech (TTS) synthesis system based on large l
 ### Environment Setup
 
 Ensure you use Python 3.10 - Python 3.12 versions.
-
+### For GPU
 ```bash
 # Clone repository
 git clone https://github.com/zai-org/GLM-TTS.git
@@ -49,6 +49,43 @@ cd GLM-TTS
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Install reinforcement learning related dependencies (optional)
+cd grpo/modules
+git clone https://github.com/s3prl/s3prl
+git clone https://github.com/omine-me/LaughterSegmentation
+# Download wavlm_large_finetune.pth and place it in grpo/ckpt directory
+```
+
+### For NPU
+Obtain CANN image
+```bash
+# Update DEVICE according to your device (/dev/davinci[0-7])
+export DEVICE=/dev/davinci7
+# Update the vllm-ascend image
+export IMAGE=quay.io/ascend/cann:8.5.1-910b-ubuntu22.04-py3.11
+docker run --rm \
+    --name vllm-ascend-env \
+    --shm-size=1g \
+    --device $DEVICE \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+```
+```bash
+# Clone repository
+git clone https://github.com/zai-org/GLM-TTS.git
+cd GLM-TTS
+
+pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
+python -m pip install -r requirements_npu.txt --no-build-isolation
 
 # Install reinforcement learning related dependencies (optional)
 cd grpo/modules
